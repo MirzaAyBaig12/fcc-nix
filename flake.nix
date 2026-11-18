@@ -20,6 +20,7 @@
         in
         rec {
           free-claude-code = pkgs.callPackage ./packages/free-claude-code.nix { };
+          headroom = pkgs.callPackage ./packages/headroom.nix { };
           default = free-claude-code;
         }
       );

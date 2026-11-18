@@ -12,64 +12,103 @@ let
     mkEnableOption
     mkIf
     mkOption
+    optionalString
     types
     ;
 
   agentSpecs = {
     claude = {
-      packageAttr = "claude-code";
       binary = "claude";
+      binaries = [ "claude" ];
+      displayName = "Claude";
+      rtkArgs = "--global --auto-patch";
+      headroom = true;
     };
     codex = {
-      packageAttr = "codex";
       binary = "codex";
+      binaries = [ "codex" ];
+      displayName = "Codex";
+      rtkArgs = "--global --codex";
+      headroom = true;
     };
     pi = {
-      packageAttr = "pi-coding-agent";
       binary = "pi";
+      binaries = [ "pi" ];
+      displayName = "Pi";
+      rtkArgs = "--global --agent pi";
+      headroom = false;
     };
     opencode = {
-      packageAttr = "opencode";
       binary = "opencode";
+      binaries = [
+        "opencode2"
+        "opencode"
+      ];
+      displayName = "OpenCode";
+      rtkArgs = null;
+      headroom = false;
     };
     cline = {
-      packageAttr = "cline";
       binary = "cline";
+      binaries = [ "cline" ];
+      displayName = "Cline";
+      rtkArgs = null;
+      headroom = false;
     };
     hermes = {
-      packageAttr = null;
       binary = "hermes";
+      binaries = [ "hermes" ];
+      displayName = "Hermes";
+      rtkArgs = null;
+      headroom = false;
     };
     dsh = {
-      packageAttr = null;
       binary = "dsh";
+      binaries = [ "dsh" ];
+      displayName = "Dsh";
+      rtkArgs = null;
+      headroom = false;
     };
     grok = {
-      packageAttr = "grok-cli";
       binary = "grok";
+      binaries = [ "grok" ];
+      displayName = "Grok";
+      rtkArgs = null;
+      headroom = true;
     };
     muse = {
-      packageAttr = null;
       binary = "muse";
+      binaries = [ "muse" ];
+      displayName = "Muse";
+      rtkArgs = null;
+      headroom = false;
     };
     aider = {
-      packageAttr = "aider-chat";
       binary = "aider";
+      binaries = [ "aider" ];
+      displayName = "Aider";
+      rtkArgs = null;
+      headroom = false;
     };
     agy = {
-      packageAttr = null;
       binary = "agy";
+      binaries = [ "agy" ];
+      displayName = "Antigravity";
+      rtkArgs = null;
+      headroom = false;
     };
   };
   agentNames = builtins.attrNames agentSpecs;
   agents = map (name: {
     inherit name;
     spec = agentSpecs.${name};
-    cfg = config."fcc-${name}";
+    cfg = config.fcc-nix.${name};
   }) agentNames;
   enabledAgents = builtins.filter (agent: agent.cfg.enable) agents;
-  sourcedAgents = builtins.filter (agent: agent.cfg.source != null) enabledAgents;
-  cfg = config.fcc;
+  cfg = config.fcc-nix;
+  optimizationPackages =
+    lib.optional cfg.optimizations.rtk.enable cfg.optimizations.rtk.package
+    ++ lib.optional cfg.optimizations.headroom.enable cfg.optimizations.headroom.package;
 
   # Only expose server/doctor from the cached package. The selected fcc-*
   # launchers below therefore never collide with launchers from the full wheel.
@@ -90,6 +129,41 @@ let
     let
       inherit (agent) name spec;
       source = agent.cfg.source;
+      expectedBinaries = lib.concatStringsSep ", " (map (binary: "bin/${binary}") spec.binaries);
+      detection =
+        if source != null then
+          ''
+            for candidate in ${lib.escapeShellArgs spec.binaries}; do
+              if [ -x "${source}/bin/\$candidate" ]; then
+                agent="${source}/bin/\$candidate"
+                selected="\$candidate"
+                break
+              fi
+            done
+          ''
+        else
+          ''
+            for candidate in ${lib.escapeShellArgs spec.binaries}; do
+              if command -v "\$candidate" >/dev/null 2>&1; then
+                agent=\$(command -v "\$candidate")
+                selected="\$candidate"
+                break
+              fi
+            done
+          '';
+      registration =
+        optionalString (cfg.optimizations.rtk.enable && spec.rtkArgs != null) ''
+          rtk init ${spec.rtkArgs}
+        ''
+        + optionalString (cfg.optimizations.headroom.enable && spec.headroom) ''
+          # Codex/Grok use marker-delimited blocks, where --force cannot replace
+          # an unmarked user entry. Claude has no such ownership marker.
+          if ! headroom mcp install --agent ${name}${
+            optionalString (name == "codex" || name == "grok") " --force"
+          }; then
+            echo "fcc-${name}: Headroom left its existing MCP registration unchanged; check the headroom entry manually." >&2
+          fi
+        '';
     in
     pkgs.runCommand "fcc-${name}-launcher"
       {
@@ -97,28 +171,73 @@ let
         meta.mainProgram = "fcc-${name}";
       }
       ''
-        if [ ! -x "${source}/bin/${spec.binary}" ]; then
-          echo "fcc-${name}: the configured source does not provide bin/${spec.binary}" >&2
-          echo "Install the agent normally and set fcc-${name}.source to its package." >&2
+        ${optionalString (source != null) ''
+          found=false
+          for binary in ${lib.escapeShellArgs spec.binaries}; do
+            if [ -x "${source}/bin/$binary" ]; then
+              found=true
+              break
+            fi
+          done
+          if [ "$found" != true ]; then
+            echo "fcc-${name}: the configured source provides none of: ${expectedBinaries}" >&2
+            echo "Set fcc-nix.${name}.source to the installed ${spec.displayName} package, or leave it null to use PATH." >&2
+            exit 1
+          fi
+        ''}
+
+        mkdir -p $out/bin $out/libexec/fcc-${name}
+
+        # FCC looks up its canonical agent command on PATH. This shim forwards
+        # to the command selected below, including opencode2 for OpenCode.
+        cat > $out/libexec/fcc-${name}/${spec.binary} <<'EOF'
+        #!${pkgs.runtimeShell}
+        if [ -z "$FCC_NIX_AGENT" ]; then
+          echo "fcc-${name}: internal agent path is not set" >&2
           exit 1
         fi
-        mkdir -p $out/bin
-        cat > $out/bin/fcc-${name} <<'EOF'
+        exec "$FCC_NIX_AGENT" "$@"
+        EOF
+        chmod +x $out/libexec/fcc-${name}/${spec.binary}
+
+        cat > $out/bin/fcc-${name} <<EOF
         #!${pkgs.runtimeShell}
+        set -u
         export PATH=${
-          lib.makeBinPath [
-            core
-            source
-          ]
-        }:$PATH
-        exec ${cfg.package}/bin/fcc-${name} "$@"
+          lib.makeBinPath ([ core ] ++ optimizationPackages ++ lib.optional (source != null) source)
+        }:\$PATH
+        ${optionalString cfg.optimizations.rtk.enable "export RTK_TELEMETRY_DISABLED=1"}
+
+        agent=
+        selected=
+        ${detection}
+        if [ -z "\$agent" ]; then
+          echo "fcc-${name}: could not find ${spec.displayName} on PATH (looked for ${lib.concatStringsSep ", " spec.binaries})." >&2
+          echo "Install ${spec.displayName} and make its executable available on PATH, then rerun fcc-${name}." >&2
+          exit 1
+        fi
+
+        ${optionalString (name == "opencode") ''
+          if [ "\$selected" = opencode ]; then
+            version=\$("\$agent" --version 2>/dev/null || true)
+            if [[ \$version =~ (^|[^0-9])v?1(\.[0-9]+)+([^0-9]|\$) ]]; then
+              echo "fcc-opencode: OpenCode 1.x is unsupported. Update to OpenCode 2 or newer." >&2
+              exit 1
+            fi
+          fi
+        ''}
+
+        ${registration}
+        export FCC_NIX_AGENT="\$agent"
+        export PATH=$out/libexec/fcc-${name}:\$PATH
+        exec ${cfg.package}/bin/fcc-${name} "\$@"
         EOF
         chmod +x $out/bin/fcc-${name}
       '';
 
-  packages = [ core ] ++ map launcher sourcedAgents;
-  serviceEnabled = config.fcc-server.service.enable;
-  anyEnabled = config.fcc-server.enable || serviceEnabled || enabledAgents != [ ];
+  packages = [ core ] ++ map launcher enabledAgents;
+  serviceEnabled = cfg.fcc-server.service.enable;
+  anyEnabled = cfg.fcc-server.enable || serviceEnabled || enabledAgents != [ ];
 
   serviceDefinition =
     if isHomeManager then
@@ -146,7 +265,7 @@ let
           wants = [ "network-online.target" ];
           path = [ core ];
           serviceConfig = {
-            User = config.fcc-server.service.user;
+            User = cfg.fcc-server.service.user;
             ExecStart = "${core}/bin/fcc-server";
             Restart = "always";
             RestartSec = "5s";
@@ -155,12 +274,33 @@ let
       };
 in
 {
-  options = {
-    fcc.package = mkOption {
+  options.fcc-nix = {
+    package = mkOption {
       type = types.package;
       default = pkgs.callPackage ../packages/free-claude-code.nix { };
       defaultText = literalExpression "inputs.fcc-nix.packages.\${system}.free-claude-code";
       description = "Unmodified Free Claude Code package used by the generated launchers.";
+    };
+
+    optimizations = {
+      rtk = {
+        enable = mkEnableOption "RTK token optimization for supported FCC launchers";
+        package = mkOption {
+          type = types.package;
+          default = pkgs.rtk;
+          defaultText = literalExpression "pkgs.rtk";
+          description = "RTK package used for launcher PATH integration and idempotent registration.";
+        };
+      };
+      headroom = {
+        enable = mkEnableOption "Headroom token optimization for supported FCC launchers";
+        package = mkOption {
+          type = types.package;
+          default = pkgs.callPackage ../packages/headroom.nix { };
+          defaultText = literalExpression "inputs.fcc-nix.packages.\${system}.headroom";
+          description = "Headroom package used for launcher PATH integration and MCP registration.";
+        };
+      };
     };
 
     fcc-server = {
@@ -187,20 +327,16 @@ in
         spec = agentSpecs.${name};
       in
       {
-        name = "fcc-${name}";
+        inherit name;
         value = {
           enable = mkEnableOption "the fcc-${name} launcher";
           source = mkOption {
             type = types.nullOr types.package;
-            default = if spec.packageAttr != null then pkgs.${spec.packageAttr} or null else null;
-            defaultText = literalExpression (
-              if spec.packageAttr != null then "pkgs.${spec.packageAttr}" else "null"
-            );
+            default = null;
             description = ''
-              Already-installed ${spec.binary} package to expose to fcc-${name}.
-              This module does not add it to your profile. Its bin/${spec.binary}
-              executable is checked at build time. Set this explicitly when using
-              an agent from another flake or when nixpkgs has no suitable package.
+              Optional ${spec.displayName} package override. By default, fcc-${name}
+              finds ${lib.concatStringsSep ", " spec.binaries} on PATH when it starts.
+              An explicit source is checked at build time but is not added to your profile.
             '';
           };
         };
@@ -211,15 +347,10 @@ in
   config = lib.mkMerge [
     (mkIf anyEnabled (
       {
-        assertions =
-          (map (agent: {
-            assertion = agent.cfg.source != null;
-            message = "fcc-${agent.name} is enabled, but fcc-${agent.name}.source is null. Set it to the installed ${agent.spec.binary} package.";
-          }) enabledAgents)
-          ++ lib.optional (!isHomeManager && serviceEnabled) {
-            assertion = config.fcc-server.service.user != null;
-            message = "fcc-server.service.user must name the existing user whose FCC configuration the NixOS service should use.";
-          };
+        assertions = lib.optional (!isHomeManager && serviceEnabled) {
+          assertion = cfg.fcc-server.service.user != null;
+          message = "fcc-nix.fcc-server.service.user must name the existing user whose FCC configuration the NixOS service should use.";
+        };
       }
       // (
         if isHomeManager then

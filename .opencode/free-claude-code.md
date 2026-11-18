@@ -20,14 +20,15 @@ If this patch fails after an upstream update, inspect the new `server_command()`
 
 The full package is built once and stays unchanged. The module's core package symlinks only `fcc-server` and `fcc-doctor`. Each enabled agent gets a tiny `runCommand` launcher that:
 
-1. fails unless `${source}/bin/<expected-command>` is executable;
-2. prepends the core and source package `bin` directories to a process-local `PATH`;
-3. execs the full package's absolute `bin/fcc-<agent>` path.
+1. finds the expected command on its runtime `PATH`, or uses an explicit `${source}/bin/<expected-command>` override;
+2. prepends the core, enabled optimization packages, and optional source package `bin` directories to a process-local `PATH`;
+3. points FCC's canonical agent lookup at a private shim that execs the selected binary;
+4. runs supported idempotent RTK/Headroom registration, then execs the full package's absolute `bin/fcc-<agent>` path.
 
-The source package is not added to the profile. The core/launcher split also avoids collisions with unselected launchers in the full wheel.
+Neither agents nor optimization tools are added to the profile. The core/launcher split also avoids collisions with unselected launchers in the full wheel.
 
 ## Current compatibility notes
 
-- FCC requires OpenCode 2. Do not assume the caller's nixpkgs `opencode` is new enough; users can override `source` from another flake.
-- There is no suitable nixpkgs default for Hermes, DeepSeek Harness, Muse, or Antigravity's `agy` CLI. `antigravity-ide` is not a substitute for `agy`.
-- Agent validation checks the package's expected binary at build time. It does not scan the live shell's `PATH` and does not install the bare agent command into the profile.
+- FCC requires OpenCode 2. Detection prefers `opencode2`, then tries `opencode`; the canonical-name shim is essential because FCC itself looks up only `opencode`. A v1 `opencode` fallback is rejected before FCC starts.
+- Explicit sources remain useful for hermetic launcher behavior. OpenCode sources may contain either `bin/opencode2` or `bin/opencode`; other agents use their canonical binary name.
+- Missing automatically detected binaries are runtime errors because the live user's `PATH` is not available as a pure Nix build input. An explicit source missing all expected binaries fails the tiny launcher build instead.
