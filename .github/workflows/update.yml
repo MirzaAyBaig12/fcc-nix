@@ -1,0 +1,50 @@
+name: Update Free Claude Code
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-free-claude-code
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - name: Bump version and wheel hash
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/update.sh
+
+      - name: Validate
+        run: |
+          nix flake check --no-build
+          nix build .#free-claude-code --no-link --print-build-logs
+          result=$(nix build .#free-claude-code --no-link --print-out-paths)
+          "$result/bin/fcc-server" --version
+
+      - name: Commit and push
+        if: ${{ !env.ACT }}
+        run: |
+          if git diff --quiet; then
+            echo "No update to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/free-claude-code.nix
+          git commit -m "free-claude-code: $(grep -oP '^\s*version = "\K[^"]+' packages/free-claude-code.nix | head -1)"
+          git pull --rebase
+          git push
