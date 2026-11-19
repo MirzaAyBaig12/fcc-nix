@@ -16,11 +16,11 @@
 
 let
   pname = "free-claude-code";
-  version = "6.19.39";
+  version = "6.19.40";
 
   src = fetchurl {
     url = "https://github.com/Alishahryar1/free-claude-code/releases/download/v${version}/free_claude_code-${version}-py3-none-any.whl";
-    hash = "sha256-V4y/XdzEzC/pGUcAFnd7m2TWeNwnLdoR5SJy3CjJzcM=";
+    hash = "sha256-ot0eZS9/l+cnuFHTM869+KcEfXI43Pzq/y0cLJqnzz4=";
   };
 
   python = python314Packages;
